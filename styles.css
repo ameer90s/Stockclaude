@@ -1,0 +1,141 @@
+@import url('https://fonts.googleapis.com/css2?family=Cairo:wght@500;700;800;900&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap');
+
+:root{
+  --bg:#0B1220;
+  --panel:#121B2E;
+  --panelAlt:#1A2740;
+  --border:#26344D;
+  --gold:#D9A441;
+  --bull:#2FBF8F;
+  --bear:#E5484D;
+  --text:#E9EEF5;
+  --dim:#8592A6;
+  --dimmer:#4B5871;
+}
+*{box-sizing:border-box;}
+html,body{margin:0; background:var(--bg); color:var(--text); font-family:'Cairo',sans-serif;}
+body{padding:0 0 40px;}
+.mono{font-family:'IBM Plex Mono',monospace; direction:ltr; display:inline-block;}
+
+/* ---------- Header ---------- */
+.topbar{
+  display:flex; align-items:center; justify-content:space-between;
+  padding:16px 16px 14px; border-bottom:1px solid var(--border);
+  background:linear-gradient(180deg, rgba(217,164,65,0.06), transparent);
+}
+.brand{display:flex; align-items:center; gap:10px;}
+.brand-mark{
+  width:34px; height:34px; border-radius:8px; flex-shrink:0;
+  background:linear-gradient(135deg, var(--gold), #A9762F);
+  display:flex; align-items:center; justify-content:center;
+  font-weight:900; color:#1a1204; font-size:16px; font-family:'IBM Plex Mono',monospace;
+}
+.brand h1{font-size:16px; margin:0; font-weight:800; letter-spacing:0.2px;}
+.daylabel{color:var(--dim); font-size:11px; margin-top:2px;}
+.icon-btn{
+  background:var(--panel); border:1px solid var(--border); border-radius:10px;
+  width:38px; height:38px; font-size:16px; cursor:pointer; color:var(--text);
+}
+
+.content{padding:0 14px;}
+
+/* ---------- Cards ---------- */
+.card{
+  background:var(--panel); border:1px solid var(--border); border-radius:12px;
+  padding:14px; margin-bottom:12px; border-top:2px solid var(--border);
+  box-shadow:0 4px 14px rgba(0,0,0,0.22);
+}
+.card.accent{border-top-color:var(--gold);}
+.row{display:flex; align-items:center; justify-content:space-between;}
+.label{color:var(--dim); font-size:11px;}
+.val{font-weight:700; font-size:14px;}
+.disclaimer{color:var(--dimmer); font-size:11px; line-height:1.7;}
+
+/* ---------- Pills ---------- */
+.pill{
+  display:inline-block; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:700;
+  border:1px solid var(--border); background:var(--panelAlt); font-family:'IBM Plex Mono',monospace;
+}
+.pill.gold{color:var(--gold); border-color:var(--gold);}
+
+/* ---------- Recommendation compact cards ---------- */
+.reccompact{
+  background:var(--panelAlt); border-radius:10px; padding:12px; margin-bottom:10px;
+  border:1px solid var(--border);
+}
+.reccompact-grid{
+  display:grid; grid-template-columns:repeat(2, 1fr); gap:6px 12px; font-size:12px;
+}
+.reccompact-grid > div{display:flex; justify-content:space-between; gap:6px;}
+.reccompact-grid b{font-weight:700;}
+
+/* ---------- Status strip ---------- */
+.statusstrip{display:flex; align-items:center; justify-content:space-between; padding:12px 14px;}
+.statusstrip .stat{text-align:center;}
+.statusstrip .stat .label{margin-bottom:3px;}
+
+/* ---------- Tabs ---------- */
+.tabs{
+  display:flex; gap:4px; padding:0 14px; margin-bottom:10px;
+  border-bottom:1px solid var(--border);
+}
+.tab{
+  flex:1; background:none; border:none; color:var(--dim); font-family:'Cairo',sans-serif;
+  font-weight:700; font-size:13px; padding:10px 4px; cursor:pointer;
+  border-bottom:2px solid transparent; margin-bottom:-1px;
+}
+.tab.active{color:var(--gold); border-bottom-color:var(--gold);}
+.tabpanel{display:block;}
+.tabpanel[hidden]{display:none;}
+
+/* ---------- Buttons ---------- */
+.btn{border:none; border-radius:9px; padding:11px; font-family:'Cairo',sans-serif; font-weight:700; font-size:14px; cursor:pointer; width:100%; transition:transform 0.08s ease;}
+.btn:active:not(:disabled){transform:scale(0.97);}
+.btn-gold{background:var(--panelAlt); border:1px solid var(--border); color:var(--text);}
+.btn-green{background:var(--bull); color:#06231b;}
+.btn-red{background:var(--bear); color:#2a0d0e;}
+.btn-gray{background:var(--dimmer); color:#fff;}
+.btn:disabled{opacity:0.5; cursor:not-allowed;}
+input{background:var(--panelAlt); border:1px solid var(--border); color:var(--text); border-radius:8px; padding:8px; font-size:12px; width:100%;}
+.chip{display:inline-flex; align-items:center; gap:6px; background:var(--panelAlt); border:1px solid var(--border); border-radius:8px; padding:4px 8px; font-size:12px; margin:2px;}
+.chip button{background:none; border:none; color:var(--bear); cursor:pointer; font-weight:bold;}
+.flexgap{display:flex; gap:8px;}
+.flex1{flex:1;}
+.spin{animation:spin 1s linear infinite;}
+@keyframes spin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}
+
+/* ---------- Ranking rows ---------- */
+.rank-row{
+  display:flex; align-items:center; justify-content:space-between; padding:10px 8px;
+  border-radius:8px; margin-bottom:5px; transition:transform 0.08s ease;
+}
+.rank-row:active{transform:scale(0.98);}
+.bar-bg{width:56px; height:5px; background:var(--border); border-radius:3px; overflow:hidden;}
+.bar-fill{height:100%; background:var(--gold);}
+
+/* ---------- Info boxes / grids ---------- */
+.grid2{display:grid; grid-template-columns:1fr 1fr; gap:8px;}
+.box{background:var(--panelAlt); border-radius:8px; padding:8px;}
+
+/* ---------- Price ladder (signature element) ---------- */
+.ladder{position:relative; height:96px; margin:18px 4px 26px;}
+.ladder-track{position:absolute; top:45px; left:0; right:0; height:5px; border-radius:3px;}
+.ladder-marker{position:absolute; top:0; bottom:0; width:1px;}
+.ladder-line{position:absolute; left:50%; width:2px; transform:translateX(-50%); border-radius:1px;}
+.row-above .ladder-line{top:20px; height:25px;}
+.row-below .ladder-line{top:50px; height:14px;}
+.ladder-tag{position:absolute; left:50%; transform:translateX(-50%); font-size:9px; font-weight:800; white-space:nowrap; text-align:center; line-height:1.4; font-family:'Cairo',sans-serif;}
+.row-above .ladder-tag{top:0;}
+.row-below .ladder-tag{top:66px;}
+.ladder-tagval{display:block; font-size:8px; color:var(--dim); font-family:'IBM Plex Mono',monospace; font-weight:500;}
+.ladder-current{position:absolute; top:40px; width:12px; height:12px; border-radius:50%; background:var(--gold); transform:translateX(-50%); box-shadow:0 0 0 4px rgba(217,164,65,0.22); border:2px solid var(--bg);}
+
+/* ---------- Performance chart ---------- */
+.chart{display:flex; align-items:flex-end; gap:4px; height:130px; padding-top:10px;}
+.chartcol{flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%;}
+.chartbar{width:100%; border-radius:3px 3px 0 0; min-height:4px;}
+.chartlabel{color:var(--dim); font-size:9px; margin-top:4px; font-family:'IBM Plex Mono',monospace;}
+
+@media (max-width: 360px){
+  .tab{font-size:12px;}
+}

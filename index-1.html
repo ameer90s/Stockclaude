@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>مساعد التداول اليومي</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark">TA</div>
+    <div>
+      <h1>مساعد التداول اليومي</h1>
+      <div class="daylabel" id="dayLabel"></div>
+    </div>
+  </div>
+  <button class="icon-btn" onclick="toggleSettings()">⚙️</button>
+</header>
+
+<div class="content">
+
+  <div class="card statusstrip">
+    <div class="stat">
+      <div class="label">توقيت نيويورك</div>
+      <div class="mono val" id="nyClock">--:--:--</div>
+    </div>
+    <div class="stat">
+      <div class="label">حالة السوق</div>
+      <div id="statusLabel" style="font-weight:700; font-size:12px;">--</div>
+    </div>
+    <div class="stat">
+      <div class="label">توقيت الإمارات</div>
+      <div class="mono val" id="dubaiClock">--:--</div>
+    </div>
+  </div>
+
+  <div class="card" id="marketBadgeCard" style="display:none;">
+    <div class="row">
+      <div class="label">اتجاه السوق العام (SPY)</div>
+      <div id="marketBadgeVal" class="mono" style="font-weight:700; font-size:13px;"></div>
+    </div>
+  </div>
+
+  <div class="card" id="settingsPanel" style="display:none;">
+    <div class="val" style="margin-bottom:8px;">مفتاح Finnhub API (مجاني)</div>
+    <div class="flexgap" style="margin-bottom:12px;">
+      <input id="apiKeyInput" placeholder="الصق المفتاح هنا" style="direction:ltr;">
+      <button class="btn btn-green" style="width:80px;" onclick="saveApiKey()">حفظ</button>
+    </div>
+    <div class="disclaimer" style="margin-bottom:14px;">احصل على مفتاح مجاني من finnhub.io ثم الصقه هنا. يُحفظ على جهازك فقط (localStorage).</div>
+
+    <div class="val" style="margin-bottom:8px;">قائمة المتابعة</div>
+    <div id="watchlistChips" style="margin-bottom:8px;"></div>
+    <div class="flexgap" style="margin-bottom:8px;">
+      <input id="newSymbolInput" placeholder="رمز السهم مثل TSLA" style="direction:ltr;" onkeydown="if(event.key==='Enter')addSymbol()">
+      <button class="btn btn-gold" style="width:50px;" onclick="addSymbol()">+</button>
+    </div>
+    <button class="btn btn-gold" style="font-size:12px; margin-bottom:16px;" onclick="addPresetSymbols()">+ إضافة أسهم عالية التذبذب (COIN, PLTR, SOFI, RIVN, MARA, SMCI, MSTR)</button>
+
+    <div class="val" style="margin-bottom:8px;">طريقة حساب المخاطرة (الوقف/الأهداف)</div>
+    <div class="flexgap" style="margin-bottom:8px;">
+      <button id="riskModeAutoBtn" class="btn flex1" style="font-size:12px;" onclick="setRiskMode('auto')">تلقائي (من الدعم/المقاومة)</button>
+      <button id="riskModeManualBtn" class="btn flex1" style="font-size:12px;" onclick="setRiskMode('manual')">يدوي (نسبة ثابتة)</button>
+    </div>
+    <div class="disclaimer" style="margin-bottom:8px;" id="riskModeExplain"></div>
+    <div class="val" style="margin-bottom:8px;" id="riskPctLabel">أقصى نسبة مخاطرة للصفقة (%)</div>
+    <div class="flexgap" style="margin-bottom:4px;">
+      <input id="riskPctInput" type="number" step="0.1" min="0.3" max="10" style="direction:ltr;">
+      <button class="btn btn-green" style="width:80px;" onclick="saveRiskPct()">حفظ</button>
+    </div>
+    <div class="disclaimer">في الوضع التلقائي: تُستخدم هذي النسبة فقط لو ما توفر دعم/مقاومة كافٍ للسهم. في الوضع اليدوي: هذي هي النسبة الثابتة المستخدمة دائمًا. الافتراضي 2%.</div>
+  </div>
+
+  <nav class="tabs">
+    <button class="tab active" id="tabbtn-rank" onclick="switchTab('rank')">الترتيب</button>
+    <button class="tab" id="tabbtn-rec" onclick="switchTab('rec')">التوصية</button>
+    <button class="tab" id="tabbtn-perf" onclick="switchTab('perf')">الأداء</button>
+  </nav>
+
+  <section class="tabpanel" id="tab-rank">
+    <button class="btn btn-gold flexgap" style="justify-content:center; align-items:center; gap:8px; margin-bottom:12px;" onclick="fetchQuotes()" id="refreshBtn">
+      <span id="refreshIcon">🔄</span> <span id="refreshText">تحديث الأسعار الآن</span>
+    </button>
+
+    <div id="errorBox" class="card" style="display:none; border-color:var(--bear); background:#2A1414; font-size:12px;"></div>
+    <div id="openingBox" class="card" style="display:none; border-color:var(--gold); font-size:12px;">
+      أول 15 دقيقة من التداول جارية — ينتظر النظام انتهاءها لالتقاط سعر مرجعي دقيق قبل إصدار أي توصية.
+    </div>
+
+    <div class="card accent">
+      <div class="val" style="margin-bottom:8px;">مقارنة أفضل الأسهم اليوم</div>
+      <div class="disclaimer" style="margin-bottom:8px;">الترتيب يقارن حركة اليوم لكل سهم بمعدل حركته المعتاد، ويأخذ بعين الاعتبار حجم التداول النسبي والدعم/المقاومة واتجاه السوق العام (SPY). التوصية تُبنى لكل الأسهم الصالحة مرة وحدة — افتح تبويب "التوصية" لتشوفها كلها وتعتمد اللي تبيها.</div>
+      <div id="rankingList"></div>
+    </div>
+  </section>
+
+  <section class="tabpanel" id="tab-rec" hidden>
+    <div class="card accent" id="recCard" style="display:none;"></div>
+  </section>
+
+  <section class="tabpanel" id="tab-perf" hidden>
+    <div class="card">
+      <div class="row" style="margin-bottom:6px;">
+        <div class="val">دقة التوصيات (آخر 14 يوم)</div>
+        <div class="mono" id="weekRate" style="color:var(--gold); font-size:12px; font-weight:700;"></div>
+      </div>
+      <div id="chartArea"></div>
+      <div id="historyLog" style="margin-top:10px;"></div>
+    </div>
+  </section>
+
+  <div class="disclaimer" style="padding:0 4px;">
+    تنبيه: التوصيات مبنية على تحليل فني آلي مبسط (زخم السعر، التذبذب، الموقع داخل مدى اليوم، الحجم، الدعم/المقاومة) لأغراض تجريبية فقط، وليست نصيحة استثمارية ولا تضمن الربح. القرار والمسؤولية الكاملة تقع عليك.
+  </div>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
