@@ -328,6 +328,26 @@ function selectSymbol(sym){
   switchTab('rec');
 }
 
+function renderHero(top){
+  const card = document.getElementById('heroCard');
+  if(!top || !top.valid){ card.style.display='none'; return; }
+  card.style.display='flex';
+  const dirColor = top.direction==='bull' ? 'var(--bull)' : 'var(--bear)';
+  const arrow = top.direction==='bull' ? '▲' : '▼';
+  const dirText = top.direction==='bull' ? 'صاعد' : 'هابط';
+  const pct = Math.max(5, Math.min(100, Math.round(top.score)));
+  card.innerHTML = `
+    <div class="hero-left">
+      <div class="hero-eyebrow">أفضل سهم اليوم</div>
+      <div class="hero-symbol">${top.sym}</div>
+      <div class="hero-sub" style="color:${dirColor};">${arrow} ${dirText} · $${fmt2(top.q.c)} (${(top.changeFromOpen*100).toFixed(2)}%)</div>
+    </div>
+    <div class="hero-ring" style="--pct:${pct};">
+      <div class="hero-ring-val">${pct}</div>
+    </div>
+  `;
+}
+
 function renderRanking(){
   const ranked = computeRanked();
   const top = ranked.find(r=>r.valid);
@@ -362,6 +382,7 @@ function renderRanking(){
     </div>`;
   }).join('');
   window._top = top;
+  renderHero(top);
 }
 
 function buildRecommendation(r){
