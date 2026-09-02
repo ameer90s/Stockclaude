@@ -79,7 +79,7 @@ function renderRiskModeUI(){
   manualBtn.style.color = !isAuto ? '#000' : 'var(--text)';
   manualBtn.style.border = `1px solid ${!isAuto?'var(--bull)':'var(--border)'}`;
   explain.textContent = isAuto
-    ? 'الوقف والأهداف تُحسب من أقرب دعم/مقاومة فعلية لكل سهم تلقائيًا (بحد أدنى 0.5% وأقصى 5% مخاطرة). لو ما توفر دعم/مقاومة كافٍ لسهم معيّن، يُستخدم احتياطيًا رقم % الثابت تحت.'
+    ? 'كل التوصيات مبنية كصفقات سكالب يومي: الوقف والأهداف تُحسب من أقرب منطقة طلب/عرض فعلية (شموع رفض قريبة) لكل سهم، بحد سكالبي (0.3% إلى 2% مخاطرة). لو ما توفرت منطقة كافية لسهم معيّن، يُستخدم احتياطيًا رقم % الثابت تحت.'
     : 'يُستخدم نفس رقم % الثابت تحت لكل الأسهم دائمًا، بغض النظر عن الدعم والمقاومة.';
   label.textContent = isAuto ? 'نسبة احتياطية (لو ما توفر دعم/مقاومة) %' : 'أقصى نسبة مخاطرة للصفقة (%)';
 }
@@ -134,10 +134,12 @@ async function fetchCandles(sym){
 function computeSR(data){
   const n = data.c.length;
   const idxToday = n-1;
-  const lookbackStart = Math.max(0, idxToday-15);
+  // Scalping needs NEAR-TERM structure, not a 15-day swing window — last ~5 sessions
+  const lookbackStart = Math.max(0, idxToday-5);
   const priorHighs = data.h.slice(lookbackStart, idxToday);
   const priorLows = data.l.slice(lookbackStart, idxToday);
   const priorOpens = data.o.slice(lookbackStart, idxToday);
+  const priorCloses = data.c.slice(lookbackStart, idxToday);
   const priorVolumes = data.v.slice(lookbackStart, idxToday);
   const resistance = priorHighs.length ? Math.max(...priorHighs) : null;
   const support = priorLows.length ? Math.min(...priorLows) : null;
@@ -146,7 +148,27 @@ function computeSR(data){
   const relVolume = (avgVolume && avgVolume>0) ? todayVolume/avgVolume : null;
   const dailyRanges = priorHighs.map((h,i)=> priorOpens[i]>0 ? (h - priorLows[i])/priorOpens[i] : null).filter(v=>v!==null);
   const avgRangePct = dailyRanges.length ? dailyRanges.reduce((a,b)=>a+b,0)/dailyRanges.length : null;
-  return {support, resistance, avgVolume, todayVolume, relVolume, avgRangePct};
+
+  // Supply/demand zones: candles with a long rejection wick mark where buyers (demand)
+  // or sellers (supply) actually stepped in — more relevant to a scalp than the raw window extreme.
+  const demandLevels = [], supplyLevels = [];
+  for(let i=0;i<priorHighs.length;i++){
+    const h=priorHighs[i], l=priorLows[i], o=priorOpens[i], c=priorCloses[i];
+    const range = (h-l) || 0.0001;
+    const lowerWick = Math.min(o,c) - l;
+    const upperWick = h - Math.max(o,c);
+    if(lowerWick/range > 0.3) demandLevels.push(l);
+    if(upperWick/range > 0.3) supplyLevels.push(h);
+  }
+  return {support, resistance, avgVolume, todayVolume, relVolume, avgRangePct, demandLevels, supplyLevels};
+}
+
+function nearestZone(specificLevels, fallbackLevel, entry, wantBelow){
+  const pool = [...specificLevels, fallbackLevel].filter(v=>v!=null && (wantBelow ? v<entry : v>entry));
+  if(!pool.length) return {level:null, fromZone:false};
+  const level = wantBelow ? Math.max(...pool) : Math.min(...pool);
+  const fromZone = specificLevels.includes(level);
+  return {level, fromZone};
 }
 
 async function fetchQuotes(){
@@ -347,15 +369,20 @@ function buildRecommendation(r){
   const sr = r.sr;
   const entry = q.c;
   const manualPct = state.maxRiskPct || 0.02;
-  const AUTO_MIN_PCT = 0.005, AUTO_MAX_PCT = 0.05;
+  const AUTO_MIN_PCT = 0.003, AUTO_MAX_PCT = 0.02; // scalp-sized risk band
+
+  // Nearest supply/demand zone (or plain structural level as fallback) below/above entry —
+  // a scalp cares about the closest real level, not the extreme of a wide window.
+  const nearSupport = sr ? nearestZone(sr.demandLevels, sr.support, entry, true) : {level:null, fromZone:false};
+  const nearResistance = sr ? nearestZone(sr.supplyLevels, sr.resistance, entry, false) : {level:null, fromZone:false};
 
   let riskPerShare, stopSource, autoRawPct = null;
 
   if(state.riskMode==='auto'){
-    if(r.direction==='bull' && sr && sr.support && sr.support < entry){
-      autoRawPct = (entry - sr.support)/entry;
-    }else if(r.direction==='bear' && sr && sr.resistance && sr.resistance > entry){
-      autoRawPct = (sr.resistance - entry)/entry;
+    if(r.direction==='bull' && nearSupport.level!=null){
+      autoRawPct = (entry - nearSupport.level)/entry;
+    }else if(r.direction==='bear' && nearResistance.level!=null){
+      autoRawPct = (nearResistance.level - entry)/entry;
     }
   }
 
@@ -368,9 +395,10 @@ function buildRecommendation(r){
     riskPerShare = entry * clampedPct;
     const wasClamped = Math.abs(clampedPct - autoRawPct) > 1e-9;
     const clampedByNoise = wasClamped && clampedPct===effectiveMinPct && noiseFloorPct>AUTO_MIN_PCT;
+    const usedZone = r.direction==='bull' ? nearSupport.fromZone : nearResistance.fromZone;
     stopSource = r.direction==='bull'
-      ? (clampedByNoise ? 'support_noise_floor' : (wasClamped ? 'support_clamped' : 'support'))
-      : (clampedByNoise ? 'resistance_noise_floor' : (wasClamped ? 'resistance_clamped' : 'resistance'));
+      ? (clampedByNoise ? 'demand_noise_floor' : (wasClamped ? 'demand_clamped' : (usedZone?'demand':'support')))
+      : (clampedByNoise ? 'supply_noise_floor' : (wasClamped ? 'supply_clamped' : (usedZone?'supply':'resistance')));
   }else{
     // Fallback: manual %, never wider than today's actual range
     const rawStop = r.direction==='bull' ? Math.min(q.l,q.o)*0.997 : Math.max(q.h,q.o)*1.003;
@@ -382,30 +410,32 @@ function buildRecommendation(r){
   const stop = r.direction==='bull' ? entry - riskPerShare : entry + riskPerShare;
   let targets = [1,2,3].map(m => r.direction==='bull' ? entry + riskPerShare*m : entry - riskPerShare*m);
   const cappedTargets = [];
-  if(r.direction==='bull' && sr && sr.resistance && sr.resistance > entry){
-    targets = targets.map((t,i)=>{ if(t > sr.resistance){ cappedTargets.push(i+1); return sr.resistance; } return t; });
-  }else if(r.direction==='bear' && sr && sr.support && sr.support < entry){
-    targets = targets.map((t,i)=>{ if(t < sr.support){ cappedTargets.push(i+1); return sr.support; } return t; });
+  if(r.direction==='bull' && nearResistance.level!=null){
+    targets = targets.map((t,i)=>{ if(t > nearResistance.level){ cappedTargets.push(i+1); return nearResistance.level; } return t; });
+  }else if(r.direction==='bear' && nearSupport.level!=null){
+    targets = targets.map((t,i)=>{ if(t < nearSupport.level){ cappedTargets.push(i+1); return nearSupport.level; } return t; });
   }
 
   const probability = Math.min(85, Math.max(50, Math.round(50 + r.score*0.55)));
   const effectivePct = riskPerShare/entry;
 
   let srNote = '';
-  if(stopSource==='support') srNote = `الوقف محسوب تلقائيًا من أقرب دعم فعلي ($${fmt2(sr.support)}) = مخاطرة ${(effectivePct*100).toFixed(1)}%.`;
-  else if(stopSource==='resistance') srNote = `الوقف محسوب تلقائيًا من أقرب مقاومة فعلية ($${fmt2(sr.resistance)}) = مخاطرة ${(effectivePct*100).toFixed(1)}%.`;
-  else if(stopSource==='support_clamped') srNote = `الدعم الفعلي قريب/بعيد جدًا، فتم ضبط المخاطرة تلقائيًا لحد معقول (${(effectivePct*100).toFixed(1)}%) بدل استخدامه حرفيًا.`;
-  else if(stopSource==='resistance_clamped') srNote = `المقاومة الفعلية قريبة/بعيدة جدًا، فتم ضبط المخاطرة تلقائيًا لحد معقول (${(effectivePct*100).toFixed(1)}%) بدل استخدامها حرفيًا.`;
-  else if(stopSource==='support_noise_floor') srNote = `الدعم كان أقرب من التذبذب اليومي المعتاد لهذا السهم، فتم توسيع الوقف تلقائيًا لـ${(effectivePct*100).toFixed(1)}% عشان ما ينضرب بحركة عادية.`;
-  else if(stopSource==='resistance_noise_floor') srNote = `المقاومة كانت أقرب من التذبذب اليومي المعتاد لهذا السهم، فتم توسيع الوقف تلقائيًا لـ${(effectivePct*100).toFixed(1)}% عشان ما ينضرب بحركة عادية.`;
-  else if(stopSource==='manual_fallback') srNote = `ما فيه دعم/مقاومة كافٍ لهذا السهم، فاستُخدمت النسبة الاحتياطية اليدوية (${(manualPct*100).toFixed(1)}%).`;
-  if(cappedTargets.length) srNote += (srNote?' ':'') + `تم تحديد الهدف ${cappedTargets.join(' و')} عند مستوى ${r.direction==='bull'?'مقاومة':'دعم'} حقيقي بدل حساب رياضي بحت.`;
+  if(stopSource==='demand') srNote = `الوقف محسوب من أقرب منطقة طلب (شمعة رفض شرائي) عند $${fmt2(nearSupport.level)} = مخاطرة ${(effectivePct*100).toFixed(1)}%.`;
+  else if(stopSource==='supply') srNote = `الوقف محسوب من أقرب منطقة عرض (شمعة رفض بيعي) عند $${fmt2(nearResistance.level)} = مخاطرة ${(effectivePct*100).toFixed(1)}%.`;
+  else if(stopSource==='support') srNote = `الوقف محسوب من أقرب دعم هيكلي عند $${fmt2(nearSupport.level)} = مخاطرة ${(effectivePct*100).toFixed(1)}%.`;
+  else if(stopSource==='resistance') srNote = `الوقف محسوب من أقرب مقاومة هيكلية عند $${fmt2(nearResistance.level)} = مخاطرة ${(effectivePct*100).toFixed(1)}%.`;
+  else if(stopSource==='demand_clamped' || stopSource==='support_clamped') srNote = `أقرب منطقة طلب/دعم قريبة/بعيدة جدًا لسكالب، فتم ضبط المخاطرة تلقائيًا لحد سكالبي معقول (${(effectivePct*100).toFixed(1)}%).`;
+  else if(stopSource==='supply_clamped' || stopSource==='resistance_clamped') srNote = `أقرب منطقة عرض/مقاومة قريبة/بعيدة جدًا لسكالب، فتم ضبط المخاطرة تلقائيًا لحد سكالبي معقول (${(effectivePct*100).toFixed(1)}%).`;
+  else if(stopSource==='demand_noise_floor' || stopSource==='support_noise_floor') srNote = `منطقة الطلب/الدعم كانت أقرب من التذبذب اليومي المعتاد، فتم توسيع الوقف تلقائيًا لـ${(effectivePct*100).toFixed(1)}% عشان ما ينضرب بحركة عادية.`;
+  else if(stopSource==='supply_noise_floor' || stopSource==='resistance_noise_floor') srNote = `منطقة العرض/المقاومة كانت أقرب من التذبذب اليومي المعتاد، فتم توسيع الوقف تلقائيًا لـ${(effectivePct*100).toFixed(1)}% عشان ما ينضرب بحركة عادية.`;
+  else if(stopSource==='manual_fallback') srNote = `ما فيه مناطق طلب/عرض أو دعم/مقاومة كافية لهذا السهم، فاستُخدمت النسبة الاحتياطية اليدوية (${(manualPct*100).toFixed(1)}%).`;
+  if(cappedTargets.length) srNote += (srNote?' ':'') + `تم تحديد الهدف ${cappedTargets.join(' و')} عند أقرب منطقة ${r.direction==='bull'?'عرض':'طلب'} بدل حساب رياضي بحت.`;
 
   return {
     symbol:r.sym, direction:r.direction, entry, stop, targets, riskPerShare, probability,
     stopSource, riskMode: state.riskMode, effectivePct, manualPct,
-    support: sr ? sr.support : null,
-    resistance: sr ? sr.resistance : null,
+    support: nearSupport.level,
+    resistance: nearResistance.level,
     relVolume: sr ? sr.relVolume : null,
     marketTrend: state.spy ? state.spy.trend : null,
     aligned: state.spy ? ((r.direction==='bull' && state.spy.trend==='up') || (r.direction==='bear' && state.spy.trend==='down')) : null,
@@ -599,8 +629,8 @@ function renderCommittedBlock(todayRecord, ranked, isLocked, canCommit){
 
   if(todayRecord.support || todayRecord.resistance || todayRecord.relVolume!==null || todayRecord.marketTrend){
     html += `<div class="grid2 mono" style="margin-bottom:8px;">
-      ${todayRecord.support ? `<div class="box"><div class="label">أقرب دعم (15 يوم)</div><div class="val">$${fmt2(todayRecord.support)}</div></div>` : ''}
-      ${todayRecord.resistance ? `<div class="box"><div class="label">أقرب مقاومة (15 يوم)</div><div class="val">$${fmt2(todayRecord.resistance)}</div></div>` : ''}
+      ${todayRecord.support ? `<div class="box"><div class="label">منطقة الطلب/الدعم الأقرب</div><div class="val">$${fmt2(todayRecord.support)}</div></div>` : ''}
+      ${todayRecord.resistance ? `<div class="box"><div class="label">منطقة العرض/المقاومة الأقرب</div><div class="val">$${fmt2(todayRecord.resistance)}</div></div>` : ''}
       ${todayRecord.relVolume!==null ? `<div class="box"><div class="label">حجم التداول اليوم</div><div class="val" style="color:${todayRecord.relVolume>=1?'var(--bull)':'var(--dim)'};">${todayRecord.relVolume.toFixed(1)}× المعدل</div></div>` : ''}
       ${todayRecord.marketTrend ? `<div class="box"><div class="label">توافق مع اتجاه السوق</div><div class="val" style="color:${todayRecord.aligned?'var(--bull)':'var(--gold)'};">${todayRecord.aligned?'✓ متوافق':'✗ معاكس'}</div></div>` : ''}
     </div>`;
