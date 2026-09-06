@@ -14,6 +14,8 @@ let state = {
   watchlist: JSON.parse(localStorage.getItem('ta_watchlist') || 'null') || DEFAULT_WATCHLIST.slice(),
   quotes: {},
   candles: {},
+  htf: {},
+  adaptive: {},
   spy: null,
   candlesSupported: null,
   baseline: null,
@@ -131,6 +133,22 @@ async function fetchCandles(sym){
   if(data.s!=='ok' || !data.c || data.c.length<5) throw new Error('candle_nodata_'+sym);
   return data;
 }
+async function fetchHTF(sym){
+  // Higher-timeframe (hourly) trend check — catches cases where a scalp signal
+  // fires against the bigger picture (e.g. lower highs on the 4h while 5m looks bullish).
+  const to = Math.floor(Date.now()/1000);
+  const from = to - 3*86400;
+  const res = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(sym)}&resolution=60&from=${from}&to=${to}&token=${state.apiKey}`);
+  if(!res.ok) throw new Error('htf_http_'+sym);
+  const data = await res.json();
+  if(data.s!=='ok' || !data.c || data.c.length<5) throw new Error('htf_nodata_'+sym);
+  const n = data.c.length;
+  const lookback = Math.min(4, n-1);
+  const recent = data.c[n-1];
+  const past = data.c[n-1-lookback];
+  const changePct = past>0 ? (recent-past)/past : 0;
+  return {trend: changePct>=0 ? 'up':'down', changePct};
+}
 function computeSR(data){
   const n = data.c.length;
   const idxToday = n-1;
@@ -222,6 +240,19 @@ async function fetchQuotes(){
     });
     state.candlesSupported = anyCandleSuccess;
 
+    // Higher-timeframe (hourly) trend — best-effort, same plan constraints as daily candles
+    const htfResults = await Promise.allSettled(state.watchlist.map(async sym=>{
+      const d = await fetchHTF(sym);
+      return [sym, d];
+    }));
+    state.htf = {};
+    htfResults.forEach(r=>{
+      if(r.status==='fulfilled'){
+        const [sym, d] = r.value;
+        state.htf[sym] = d;
+      }
+    });
+
     // SPY as a simple market-direction filter
     try{
       const spyRes = await fetch(`https://finnhub.io/api/v1/quote?symbol=SPY&token=${state.apiKey}`);
@@ -231,6 +262,8 @@ async function fetchQuotes(){
         state.spy = {o:spyData.o, c:spyData.c, changePct:chg, trend: chg>=0 ? 'up':'down'};
       }
     }catch(e){ /* non-critical, ignore */ }
+
+    state.adaptive = computeAdaptiveAdjustments();
 
   }catch(e){
     showError('تعذّر جلب الأسعار — تأكد من صحة المفتاح ورموز الأسهم، ومن أنك فتحت الملف كموقع حقيقي (http/https) وليس مباشرة كملف محلي');
@@ -275,6 +308,31 @@ function savePriceHistoryEntry(sym, entry){
   localStorage.setItem('ta_pricehist', JSON.stringify(all));
 }
 
+function computeAdaptiveAdjustments(){
+  const MIN_SAMPLE = 5;
+  const WEAK_WINRATE = 0.4;
+  const graded = state.history.filter(h=>isRealTrade(h.outcome));
+  const adj = {};
+
+  const spyOpposed = graded.filter(h=>h.aligned===false);
+  if(spyOpposed.length>=MIN_SAMPLE){
+    const wins = spyOpposed.filter(h=>getR(h)>0).length;
+    const winRate = wins/spyOpposed.length;
+    adj.spy = {sample:spyOpposed.length, winRate, penalized: winRate<WEAK_WINRATE};
+    if(winRate<WEAK_WINRATE) adj.spyOpposedPenalty = 0.6;
+  }
+
+  const htfOpposed = graded.filter(h=>h.htfAligned===false);
+  if(htfOpposed.length>=MIN_SAMPLE){
+    const wins = htfOpposed.filter(h=>getR(h)>0).length;
+    const winRate = wins/htfOpposed.length;
+    adj.htf = {sample:htfOpposed.length, winRate, penalized: winRate<WEAK_WINRATE};
+    if(winRate<WEAK_WINRATE) adj.htfOpposedPenalty = 0.6;
+  }
+
+  return adj;
+}
+
 function computeRanked(){
   const p = nyParts(new Date());
   const tk = todayKey(p);
@@ -312,15 +370,25 @@ function computeRanked(){
     }
 
     // Market-direction filter: trading with SPY's trend is favored, against it is penalized
-    let alignmentFactor = 1;
+    let alignmentFactor = 1, spyAligned = null;
     if(state.spy){
-      const aligned = (direction==='bull' && state.spy.trend==='up') || (direction==='bear' && state.spy.trend==='down');
-      alignmentFactor = aligned ? 1.15 : 0.85;
+      spyAligned = (direction==='bull' && state.spy.trend==='up') || (direction==='bear' && state.spy.trend==='down');
+      alignmentFactor = spyAligned ? 1.15 : 0.85;
+      if(!spyAligned && state.adaptive.spyOpposedPenalty) alignmentFactor *= state.adaptive.spyOpposedPenalty;
     }
 
-    compositeScore = compositeScore * volumeFactor * alignmentFactor;
+    // Higher-timeframe (hourly) filter: catches a scalp signal that fights the bigger trend
+    const htf = state.htf[sym] || null;
+    let htfFactor = 1, htfAligned = null;
+    if(htf){
+      htfAligned = (direction==='bull' && htf.trend==='up') || (direction==='bear' && htf.trend==='down');
+      htfFactor = htfAligned ? 1.15 : 0.85;
+      if(!htfAligned && state.adaptive.htfOpposedPenalty) htfFactor *= state.adaptive.htfOpposedPenalty;
+    }
 
-    return {sym, q, score:compositeScore, direction, changeFromOpen, relMultiplier, volumeFactor, alignmentFactor, sr, valid:true};
+    compositeScore = compositeScore * volumeFactor * alignmentFactor * htfFactor;
+
+    return {sym, q, score:compositeScore, direction, changeFromOpen, relMultiplier, volumeFactor, alignmentFactor, spyAligned, htf, htfFactor, htfAligned, sr, valid:true};
   }).sort((a,b)=>b.score-a.score);
 }
 
@@ -451,6 +519,7 @@ function buildRecommendation(r){
   else if(stopSource==='supply_noise_floor' || stopSource==='resistance_noise_floor') srNote = `منطقة العرض/المقاومة كانت أقرب من التذبذب اليومي المعتاد، فتم توسيع الوقف تلقائيًا لـ${(effectivePct*100).toFixed(1)}% عشان ما ينضرب بحركة عادية.`;
   else if(stopSource==='manual_fallback') srNote = `ما فيه مناطق طلب/عرض أو دعم/مقاومة كافية لهذا السهم، فاستُخدمت النسبة الاحتياطية اليدوية (${(manualPct*100).toFixed(1)}%).`;
   if(cappedTargets.length) srNote += (srNote?' ':'') + `تم تحديد الهدف ${cappedTargets.join(' و')} عند أقرب منطقة ${r.direction==='bull'?'عرض':'طلب'} بدل حساب رياضي بحت.`;
+  if(r.htfAligned===false) srNote += (srNote?' ':'') + `⚠️ الفريم الأكبر (الساعة) يعطي اتجاه عكسي لهذي الإشارة — احتمال الفشل أعلى من المعتاد، فكّر بصفقة أسرع/أصغر أو تجاهلها.`;
 
   return {
     symbol:r.sym, direction:r.direction, entry, stop, targets, riskPerShare, probability,
@@ -459,7 +528,9 @@ function buildRecommendation(r){
     resistance: nearResistance.level,
     relVolume: sr ? sr.relVolume : null,
     marketTrend: state.spy ? state.spy.trend : null,
-    aligned: state.spy ? ((r.direction==='bull' && state.spy.trend==='up') || (r.direction==='bear' && state.spy.trend==='down')) : null,
+    aligned: r.spyAligned,
+    htfTrend: r.htf ? r.htf.trend : null,
+    htfAligned: r.htfAligned,
     srNote,
   };
 }
@@ -483,7 +554,9 @@ function commitRecommendation(sym){
   state.history = [record, ...state.history.filter(h=>h.date!==tk)].slice(0,90);
   localStorage.setItem('ta_history', JSON.stringify(state.history));
   renderAllRecommendations();
+  state.adaptive = computeAdaptiveAdjustments();
   renderChart();
+  renderAdaptivePanel();
 }
 function gradeToday(outcome){
   const p = nyParts(new Date());
@@ -500,7 +573,9 @@ function gradeToday(outcome){
   });
   localStorage.setItem('ta_history', JSON.stringify(state.history));
   renderAllRecommendations();
+  state.adaptive = computeAdaptiveAdjustments();
   renderChart();
+  renderAdaptivePanel();
 }
 
 const OUTCOME_LABELS = {target1:'هدف 1 (+1R)', target2:'هدف 2 (+2R)', target3:'هدف 3 (+3R)', stop:'وقف (-1R)', none:'لم يُنفَّذ', eod:'إغلاق نهاية اليوم'};
@@ -550,7 +625,9 @@ function correctRecord(date, outcome){
   });
   localStorage.setItem('ta_history', JSON.stringify(state.history));
   window._editingDate = null;
+  state.adaptive = computeAdaptiveAdjustments();
   renderChart();
+  renderAdaptivePanel();
   renderAllRecommendations();
 }
 
@@ -654,6 +731,7 @@ function renderCommittedBlock(todayRecord, ranked, isLocked, canCommit){
       ${todayRecord.resistance ? `<div class="box"><div class="label">منطقة العرض/المقاومة الأقرب</div><div class="val">$${fmt2(todayRecord.resistance)}</div></div>` : ''}
       ${todayRecord.relVolume!==null ? `<div class="box"><div class="label">حجم التداول اليوم</div><div class="val" style="color:${todayRecord.relVolume>=1?'var(--bull)':'var(--dim)'};">${todayRecord.relVolume.toFixed(1)}× المعدل</div></div>` : ''}
       ${todayRecord.marketTrend ? `<div class="box"><div class="label">توافق مع اتجاه السوق</div><div class="val" style="color:${todayRecord.aligned?'var(--bull)':'var(--gold)'};">${todayRecord.aligned?'✓ متوافق':'✗ معاكس'}</div></div>` : ''}
+      ${todayRecord.htfTrend ? `<div class="box"><div class="label">توافق مع الفريم الأكبر (ساعة)</div><div class="val" style="color:${todayRecord.htfAligned?'var(--bull)':'var(--gold)'};">${todayRecord.htfAligned?'✓ متوافق':'✗ معاكس'}</div></div>` : ''}
     </div>`;
   }
   if(todayRecord.srNote){
@@ -723,6 +801,35 @@ function renderAllRecommendations(){
   card.innerHTML = html;
 }
 
+function renderAdaptivePanel(){
+  const card = document.getElementById('adaptiveCard');
+  if(!card) return;
+  const adj = state.adaptive || {};
+  const MIN_SAMPLE = 5;
+  let html = `<div class="val" style="margin-bottom:8px;">التعلّم التلقائي من سجلّك</div>`;
+  const rows = [];
+
+  if(adj.spy){
+    const pct = Math.round(adj.spy.winRate*100);
+    rows.push(`<div class="disclaimer" style="margin-bottom:6px; ${adj.spy.penalized?'color:var(--gold);':''}">
+      ${adj.spy.penalized?'⚠️':'ℹ️'} صفقاتك المعاكسة لاتجاه SPY: ${pct}% نجاح من أصل ${adj.spy.sample} صفقة${adj.spy.penalized?' — تم تقليل وزنها تلقائيًا بالتوصيات الجديدة.':' (نسبة مقبولة، ما فيه تعديل).'}
+    </div>`);
+  }else{
+    rows.push(`<div class="disclaimer" style="margin-bottom:6px;">صفقاتك المعاكسة لاتجاه SPY: تحتاج ${MIN_SAMPLE} صفقات مقيَّمة على الأقل من هذا النوع لتفعيل التعلّم (عندك أقل من كذا حاليًا).</div>`);
+  }
+
+  if(adj.htf){
+    const pct = Math.round(adj.htf.winRate*100);
+    rows.push(`<div class="disclaimer" style="${adj.htf.penalized?'color:var(--gold);':''}">
+      ${adj.htf.penalized?'⚠️':'ℹ️'} صفقاتك المعاكسة للفريم الأكبر (ساعة): ${pct}% نجاح من أصل ${adj.htf.sample} صفقة${adj.htf.penalized?' — تم تقليل وزنها تلقائيًا بالتوصيات الجديدة.':' (نسبة مقبولة، ما فيه تعديل).'}
+    </div>`);
+  }else{
+    rows.push(`<div class="disclaimer">صفقاتك المعاكسة للفريم الأكبر: تحتاج ${MIN_SAMPLE} صفقات مقيَّمة على الأقل من هذا النوع لتفعيل التعلّم.</div>`);
+  }
+
+  card.innerHTML = html + rows.join('');
+}
+
 function renderChart(){
   const sorted = [...state.history].sort((a,b)=>a.date.localeCompare(b.date)).slice(-14);
   const chartArea = document.getElementById('chartArea');
@@ -784,7 +891,9 @@ function init(){
   updateClock();
   renderRanking();
   renderAllRecommendations();
+  state.adaptive = computeAdaptiveAdjustments();
   renderChart();
+  renderAdaptivePanel();
   setInterval(updateClock, 1000);
   setInterval(()=>{
     const p = nyParts(new Date());
