@@ -1,5 +1,12 @@
 
 const DEFAULT_WATCHLIST = ['OKLO','ROKU','AFRM','HOOD','ENPH'];
+
+// Best-effort sector proxy — approximate, used to compare a stock against its
+// own sector instead of only the broad market (SPY) when we recognize the symbol.
+const SECTOR_ETF_MAP = {
+  OKLO:'URA', SMCI:'SOXX', ENPH:'TAN', COIN:'BLOK', MSTR:'BLOK', RIOT:'BLOK', MARA:'BLOK',
+  ROKU:'XLC', AFRM:'XLF', HOOD:'XLF', SOFI:'XLF', PLTR:'XLK', RIVN:'CARZ', GRRR:'XLC',
+};
 const ARABIC_WEEKDAY = {Sun:'الأحد',Mon:'الإثنين',Tue:'الثلاثاء',Wed:'الأربعاء',Thu:'الخميس',Fri:'الجمعة',Sat:'السبت'};
 const STATUS_LABEL = {
   pre:{text:'قبل الافتتاح', color:'var(--dim)'},
@@ -16,6 +23,9 @@ let state = {
   candles: {},
   htf: {},
   adaptive: {},
+  news: {},
+  sectorQuotes: {},
+  riskAmountUsd: parseFloat(localStorage.getItem('ta_riskamount')) || 100,
   spy: null,
   candlesSupported: null,
   baseline: null,
@@ -59,6 +69,7 @@ function toggleSettings(){
   el.style.display = el.style.display==='none' ? 'block' : 'none';
   document.getElementById('apiKeyInput').value = state.apiKey;
   document.getElementById('riskPctInput').value = (state.maxRiskPct*100).toFixed(1);
+  document.getElementById('riskAmountInput').value = state.riskAmountUsd;
   renderWatchlistChips();
   renderRiskModeUI();
 }
@@ -90,6 +101,14 @@ function saveRiskPct(){
   if(!isNaN(v) && v>0){
     state.maxRiskPct = v/100;
     localStorage.setItem('ta_maxriskpct', state.maxRiskPct);
+  }
+}
+function saveRiskAmount(){
+  const v = parseFloat(document.getElementById('riskAmountInput').value);
+  if(!isNaN(v) && v>0){
+    state.riskAmountUsd = v;
+    localStorage.setItem('ta_riskamount', v);
+    renderAllRecommendations();
   }
 }
 function saveApiKey(){
@@ -253,6 +272,36 @@ async function fetchQuotes(){
       }
     });
 
+    // Company news today — a technical setup is less reliable when a real catalyst is in play
+    const todayStr = tk;
+    const newsResults = await Promise.allSettled(state.watchlist.map(async sym=>{
+      const res = await fetch(`https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(sym)}&from=${todayStr}&to=${todayStr}&token=${state.apiKey}`);
+      if(!res.ok) throw new Error('news_http_'+sym);
+      const data = await res.json();
+      return [sym, Array.isArray(data) ? data.length : 0];
+    }));
+    state.news = {};
+    newsResults.forEach(r=>{
+      if(r.status==='fulfilled'){
+        const [sym, count] = r.value;
+        state.news[sym] = {count, hasNews: count>0};
+      }
+    });
+
+    // Sector proxy quotes (best-effort, only for recognized symbols)
+    const neededETFs = [...new Set(state.watchlist.map(s=>SECTOR_ETF_MAP[s]).filter(Boolean))];
+    const sectorResults = await Promise.allSettled(neededETFs.map(async etf=>{
+      const res = await fetch(`https://finnhub.io/api/v1/quote?symbol=${etf}&token=${state.apiKey}`);
+      const data = await res.json();
+      if(!data || !data.o) throw new Error('sector_nodata_'+etf);
+      const chg = (data.c-data.o)/data.o;
+      return [etf, {trend: chg>=0?'up':'down', changePct:chg}];
+    }));
+    state.sectorQuotes = {};
+    sectorResults.forEach(r=>{
+      if(r.status==='fulfilled'){ const [etf,d]=r.value; state.sectorQuotes[etf]=d; }
+    });
+
     // SPY as a simple market-direction filter
     try{
       const spyRes = await fetch(`https://finnhub.io/api/v1/quote?symbol=SPY&token=${state.apiKey}`);
@@ -330,6 +379,25 @@ function computeAdaptiveAdjustments(){
     if(winRate<WEAK_WINRATE) adj.htfOpposedPenalty = 0.6;
   }
 
+  // Session-of-day and weekday patterns — grouped from the user's own createdAt timestamps
+  const bucketed = {};
+  graded.forEach(h=>{
+    if(!h.createdAt) return;
+    const p = nyParts(new Date(h.createdAt));
+    const session = getSessionBucket(p);
+    const weekday = p.weekday;
+    (bucketed['session_'+session] = bucketed['session_'+session] || []).push(h);
+    (bucketed['weekday_'+weekday] = bucketed['weekday_'+weekday] || []).push(h);
+  });
+  Object.keys(bucketed).forEach(key=>{
+    const arr = bucketed[key];
+    if(arr.length>=MIN_SAMPLE){
+      const wins = arr.filter(h=>getR(h)>0).length;
+      const winRate = wins/arr.length;
+      adj[key] = {sample:arr.length, winRate, penalized: winRate<WEAK_WINRATE};
+    }
+  });
+
   return adj;
 }
 
@@ -386,10 +454,51 @@ function computeRanked(){
       if(!htfAligned && state.adaptive.htfOpposedPenalty) htfFactor *= state.adaptive.htfOpposedPenalty;
     }
 
-    compositeScore = compositeScore * volumeFactor * alignmentFactor * htfFactor;
+    // Sector proxy filter — compares the stock to its own sector instead of only the broad market
+    const sectorETF = SECTOR_ETF_MAP[sym] || null;
+    const sectorData = sectorETF ? state.sectorQuotes[sectorETF] : null;
+    let sectorFactor = 1, sectorAligned = null;
+    if(sectorData){
+      sectorAligned = (direction==='bull' && sectorData.trend==='up') || (direction==='bear' && sectorData.trend==='down');
+      sectorFactor = sectorAligned ? 1.1 : 0.9;
+    }
 
-    return {sym, q, score:compositeScore, direction, changeFromOpen, relMultiplier, volumeFactor, alignmentFactor, spyAligned, htf, htfFactor, htfAligned, sr, valid:true};
+    // Session/weekday pattern learned from the user's own log
+    const nowParts = nyParts(new Date());
+    const sessionBucket = getSessionBucket(nowParts);
+    const weekdayBucket = nowParts.weekday;
+    let sessionFactor = 1;
+    const sKey = 'session_'+sessionBucket, wKey = 'weekday_'+weekdayBucket;
+    if(state.adaptive[sKey] && state.adaptive[sKey].penalized) sessionFactor *= 0.7;
+    if(state.adaptive[wKey] && state.adaptive[wKey].penalized) sessionFactor *= 0.7;
+
+    // Gap vs previous close — a stock that gapped behaves differently than a normal session
+    const gapPct = q.pc ? (q.o - q.pc)/q.pc : 0;
+
+    compositeScore = compositeScore * volumeFactor * alignmentFactor * htfFactor * sectorFactor * sessionFactor;
+
+    // Confluence tally: how many independent factors actually confirm this signal
+    let confluenceCount = 0, confluenceTotal = 0;
+    if(relMultiplier!==null){ confluenceTotal++; if(relMultiplier>1) confluenceCount++; }
+    if(sr && sr.relVolume!==null){ confluenceTotal++; if(sr.relVolume>=1) confluenceCount++; }
+    if(spyAligned!==null){ confluenceTotal++; if(spyAligned) confluenceCount++; }
+    if(htfAligned!==null){ confluenceTotal++; if(htfAligned) confluenceCount++; }
+    if(sectorAligned!==null){ confluenceTotal++; if(sectorAligned) confluenceCount++; }
+
+    return {
+      sym, q, score:compositeScore, direction, changeFromOpen, relMultiplier, volumeFactor,
+      alignmentFactor, spyAligned, htf, htfFactor, htfAligned, sectorETF, sectorData, sectorAligned,
+      gapPct, confluenceCount, confluenceTotal, sessionBucket, weekdayBucket, sr, valid:true
+    };
   }).sort((a,b)=>b.score-a.score);
+}
+
+function getSessionBucket(p){
+  const mins = parseInt(p.hour,10)*60 + parseInt(p.minute,10);
+  if(mins<585) return 'opening';
+  if(mins<690) return 'morning'; // 9:45–11:30
+  if(mins<840) return 'midday'; // 11:30–14:00
+  return 'close'; // 14:00–16:00
 }
 
 function selectSymbol(sym){
@@ -521,6 +630,20 @@ function buildRecommendation(r){
   if(cappedTargets.length) srNote += (srNote?' ':'') + `تم تحديد الهدف ${cappedTargets.join(' و')} عند أقرب منطقة ${r.direction==='bull'?'عرض':'طلب'} بدل حساب رياضي بحت.`;
   if(r.htfAligned===false) srNote += (srNote?' ':'') + `⚠️ الفريم الأكبر (الساعة) يعطي اتجاه عكسي لهذي الإشارة — احتمال الفشل أعلى من المعتاد، فكّر بصفقة أسرع/أصغر أو تجاهلها.`;
 
+  // Chasing check: if entry already sits deep inside the zone-to-zone range, the easy part of the move may be over
+  let chaseWarning = '';
+  if(nearSupport.level!=null && nearResistance.level!=null && nearResistance.level>nearSupport.level){
+    const posInRange = (entry - nearSupport.level)/(nearResistance.level - nearSupport.level);
+    if(r.direction==='bull' && posInRange>0.6) chaseWarning = `⚠️ السعر بعيد عن منطقة الدعم القريبة (${(posInRange*100).toFixed(0)}% من المسافة لمنطقة العرض) — احتمال ملاحقة حركة فات وقتها.`;
+    else if(r.direction==='bear' && (1-posInRange)>0.6) chaseWarning = `⚠️ السعر بعيد عن منطقة المقاومة القريبة — احتمال ملاحقة حركة فات وقتها.`;
+  }
+
+  // Suggested share size from the user's fixed risk-per-trade amount
+  const suggestedShares = riskPerShare>0 ? Math.max(1, Math.floor((state.riskAmountUsd||100)/riskPerShare)) : null;
+
+  const newsInfo = state.news[r.sym] || null;
+  const gapPct = r.gapPct || 0;
+
   return {
     symbol:r.sym, direction:r.direction, entry, stop, targets, riskPerShare, probability,
     stopSource, riskMode: state.riskMode, effectivePct, manualPct,
@@ -531,19 +654,39 @@ function buildRecommendation(r){
     aligned: r.spyAligned,
     htfTrend: r.htf ? r.htf.trend : null,
     htfAligned: r.htfAligned,
+    sectorETF: r.sectorETF, sectorAligned: r.sectorAligned,
+    confluenceCount: r.confluenceCount, confluenceTotal: r.confluenceTotal,
+    gapPct, hasNews: newsInfo ? newsInfo.hasNews : null, newsCount: newsInfo ? newsInfo.count : 0,
+    suggestedShares, riskAmountUsd: state.riskAmountUsd,
+    chaseWarning,
     srNote,
   };
 }
 
-const OUTCOME_R = {target1:1, target2:2, target3:3, stop:-1};
+const OUTCOME_R = {target1:1, target2:2, target3:3, stop:-1, breakeven_t1:0};
 function isRealTrade(outcome){ return (outcome in OUTCOME_R) || outcome==='eod'; }
 function getR(record){ return record.outcome==='eod' ? record.customR : OUTCOME_R[record.outcome]; }
+
+function getConsecutiveLossCount(){
+  const graded = [...state.history].filter(h=>isRealTrade(h.outcome)).sort((a,b)=>b.date.localeCompare(a.date));
+  let count = 0;
+  for(const h of graded){
+    if(getR(h)<0) count++;
+    else break;
+  }
+  return count;
+}
 
 function getTodayRecord(tk){
   return state.history.find(h=>h.date===tk);
 }
 
 function commitRecommendation(sym){
+  const CIRCUIT_BREAKER_LIMIT = 3;
+  if(getConsecutiveLossCount()>=CIRCUIT_BREAKER_LIMIT){
+    alert('توقف — عندك ' + CIRCUIT_BREAKER_LIMIT + ' وقف خسارة متتالية. البرنامج يمنع اعتماد صفقات جديدة اليوم لحمايتك من صيد الخسارة. جرّب بكرة بعقل هادئ.');
+    return;
+  }
   const ranked = computeRanked();
   const r = ranked.find(x=>x.sym===sym && x.valid);
   if(!r) return;
@@ -578,7 +721,7 @@ function gradeToday(outcome){
   renderAdaptivePanel();
 }
 
-const OUTCOME_LABELS = {target1:'هدف 1 (+1R)', target2:'هدف 2 (+2R)', target3:'هدف 3 (+3R)', stop:'وقف (-1R)', none:'لم يُنفَّذ', eod:'إغلاق نهاية اليوم'};
+const OUTCOME_LABELS = {target1:'هدف 1 (+1R)', target2:'هدف 2 (+2R)', target3:'هدف 3 (+3R)', stop:'وقف (-1R)', breakeven_t1:'تعادل بعد الهدف 1 (0R)', none:'لم يُنفَّذ', eod:'إغلاق نهاية اليوم'};
 
 function renderHistoryLog(){
   const box = document.getElementById('historyLog');
@@ -680,13 +823,19 @@ function renderCompactCard(r, rec, isCommitted, canCommit){
     : `border-right:4px solid ${dirColor};`;
   const actionHtml = isCommitted
     ? `<div class="label" style="color:var(--gold); margin-top:8px; font-weight:700;">✓ الصفقة المعتمدة اليوم</div>`
-    : `<button class="btn btn-gold" style="font-size:11px; margin-top:8px;" ${canCommit?'':'disabled'} onclick="commitRecommendation('${r.sym}')">${canCommit ? 'اعتماد هذه الصفقة' : 'مقفول — عندك صفقة معتمدة اليوم'}</button>`;
+    : `<button class="btn btn-gold" style="font-size:11px; margin-top:8px;" ${canCommit?'':'disabled'} onclick="commitRecommendation('${r.sym}')">${canCommit ? 'اعتماد هذه الصفقة' : 'مقفول — عندك صفقة معتمدة اليوم أو توقّف مؤقت'}</button>`;
+  const badges = [];
+  if(rec.confluenceTotal) badges.push(`<span class="pill" style="font-size:10px;">توافق ${rec.confluenceCount}/${rec.confluenceTotal}</span>`);
+  if(rec.hasNews) badges.push(`<span class="pill gold" style="font-size:10px;">📰 خبر اليوم</span>`);
+  if(rec.chaseWarning) badges.push(`<span class="pill" style="font-size:10px; color:var(--gold); border-color:var(--gold);">⚠️ ملاحقة</span>`);
+  if(Math.abs(rec.gapPct)>0.015) badges.push(`<span class="pill" style="font-size:10px;">فجوة ${(rec.gapPct*100).toFixed(1)}%</span>`);
   return `<div class="reccompact" style="${cardStyle}">
     <div class="row" style="margin-bottom:8px;">
       <span class="mono val">${r.sym}</span>
       <span class="pill" style="color:${dirColor}; border-color:${dirColor};">${dirLabel}</span>
       <span class="pill gold">${rec.probability}%</span>
     </div>
+    ${badges.length ? `<div class="flexgap" style="flex-wrap:wrap; gap:5px; margin-bottom:8px;">${badges.join('')}</div>` : ''}
     <div class="reccompact-grid mono">
       <div><span class="label">دخول</span><b>$${fmt2(rec.entry)}</b></div>
       <div><span class="label" style="color:var(--bear);">وقف</span><b style="color:var(--bear);">$${fmt2(rec.stop)}</b></div>
@@ -697,6 +846,7 @@ function renderCompactCard(r, rec, isCommitted, canCommit){
     ${actionHtml}
   </div>`;
 }
+
 
 function renderCommittedBlock(todayRecord, ranked, isLocked, canCommit){
   const r = ranked.find(x=>x.sym===todayRecord.symbol);
@@ -732,7 +882,15 @@ function renderCommittedBlock(todayRecord, ranked, isLocked, canCommit){
       ${todayRecord.relVolume!==null ? `<div class="box"><div class="label">حجم التداول اليوم</div><div class="val" style="color:${todayRecord.relVolume>=1?'var(--bull)':'var(--dim)'};">${todayRecord.relVolume.toFixed(1)}× المعدل</div></div>` : ''}
       ${todayRecord.marketTrend ? `<div class="box"><div class="label">توافق مع اتجاه السوق</div><div class="val" style="color:${todayRecord.aligned?'var(--bull)':'var(--gold)'};">${todayRecord.aligned?'✓ متوافق':'✗ معاكس'}</div></div>` : ''}
       ${todayRecord.htfTrend ? `<div class="box"><div class="label">توافق مع الفريم الأكبر (ساعة)</div><div class="val" style="color:${todayRecord.htfAligned?'var(--bull)':'var(--gold)'};">${todayRecord.htfAligned?'✓ متوافق':'✗ معاكس'}</div></div>` : ''}
+      ${todayRecord.sectorETF ? `<div class="box"><div class="label">توافق مع القطاع (${todayRecord.sectorETF})</div><div class="val" style="color:${todayRecord.sectorAligned?'var(--bull)':'var(--gold)'};">${todayRecord.sectorAligned?'✓ متوافق':'✗ معاكس'}</div></div>` : ''}
+      ${todayRecord.confluenceTotal ? `<div class="box"><div class="label">قوة التوافق</div><div class="val" style="color:var(--gold);">${todayRecord.confluenceCount} من ${todayRecord.confluenceTotal}</div></div>` : ''}
+      ${Math.abs(todayRecord.gapPct)>0.01 ? `<div class="box"><div class="label">فجوة سعرية (Gap)</div><div class="val">${(todayRecord.gapPct*100).toFixed(1)}%</div></div>` : ''}
+      ${todayRecord.hasNews ? `<div class="box"><div class="label">أخبار اليوم</div><div class="val" style="color:var(--gold);">📰 ${todayRecord.newsCount} خبر</div></div>` : ''}
+      ${todayRecord.suggestedShares ? `<div class="box"><div class="label">حجم مقترح (مخاطرة $${todayRecord.riskAmountUsd})</div><div class="val">${todayRecord.suggestedShares} سهم</div></div>` : ''}
     </div>`;
+  }
+  if(todayRecord.chaseWarning){
+    html += `<div class="disclaimer" style="margin-bottom:8px; color:var(--gold);">${todayRecord.chaseWarning}</div>`;
   }
   if(todayRecord.srNote){
     html += `<div class="disclaimer" style="margin-bottom:8px; color:var(--gold);">${todayRecord.srNote}</div>`;
@@ -751,6 +909,7 @@ function renderCommittedBlock(todayRecord, ranked, isLocked, canCommit){
       <button class="btn btn-red flex1" onclick="gradeToday('stop')" style="font-size:12px;">✕ لمس وقف الخسارة</button>
       <button class="btn btn-gray flex1" onclick="gradeToday('none')" style="font-size:12px;">⊘ لم يُنفَّذ</button>
     </div>`;
+    html += `<button class="btn btn-gold" style="font-size:11px; margin-bottom:6px;" onclick="gradeToday('breakeven_t1')">◐ وصل الهدف 1 ثم رجع للدخول (تعادل 0R)</button>`;
     html += `<button class="btn btn-gold" style="font-size:12px; margin-bottom:8px;" onclick="gradeToday('eod')">⏱ انتهى اليوم بدون هدف أو وقف (إغلاق بالسعر الحالي)</button>`;
     if(canCommit){
       html += `<button class="btn btn-gold" style="font-size:12px;" onclick="commitRecommendation('${todayRecord.symbol}')">↻ تحديث الصفقة بالسعر الحالي</button>`;
@@ -758,7 +917,7 @@ function renderCommittedBlock(todayRecord, ranked, isLocked, canCommit){
   }else if(todayRecord.outcome==='none'){
     html += `<div class="label" style="margin-bottom:8px;">نتيجة اليوم: ⚪ لم يُنفَّذ الدخول</div>`;
   }else{
-    const outLabels = {target1:'✅ تحقق الهدف 1 (1R)', target2:'✅ تحقق الهدف 2 (2R)', target3:'✅ تحقق الهدف 3 (3R)', stop:'❌ لمس وقف الخسارة (1R-)'};
+    const outLabels = {target1:'✅ تحقق الهدف 1 (1R)', target2:'✅ تحقق الهدف 2 (2R)', target3:'✅ تحقق الهدف 3 (3R)', stop:'❌ لمس وقف الخسارة (1R-)', breakeven_t1:'◐ تعادل بعد الهدف 1 (0R)'};
     if(todayRecord.outcome==='eod'){
       const r2 = todayRecord.customR;
       html += `<div class="label">نتيجة اليوم: ⏱ إغلاق نهاية اليوم (${r2>=0?'+':''}${r2}R)</div>`;
@@ -781,9 +940,14 @@ function renderAllRecommendations(){
   const tk = todayKey(p);
   const todayRecord = getTodayRecord(tk);
   const isLocked = todayRecord && isRealTrade(todayRecord.outcome);
-  const canCommit = (status==='active' || status==='closed_day') && !isLocked;
+  const consecutiveLosses = getConsecutiveLossCount();
+  const circuitTripped = consecutiveLosses>=3;
+  const canCommit = (status==='active' || status==='closed_day') && !isLocked && !circuitTripped;
 
   let html = '';
+  if(circuitTripped){
+    html += `<div class="disclaimer" style="margin-bottom:12px; color:var(--bear); background:rgba(229,72,77,0.08); border:1px solid var(--bear); border-radius:8px; padding:10px;">🛑 عندك ${consecutiveLosses} وقف خسارة متتالية. اعتماد صفقات جديدة موقوف اليوم لحمايتك من صيد الخسارة (Revenge Trading) — جرّب بكرة بعقل هادئ.</div>`;
+  }
   if(todayRecord){
     html += renderCommittedBlock(todayRecord, ranked, isLocked, canCommit);
     html += `<div style="border-top:1px solid var(--border); margin:16px 0 12px;"></div>`;
@@ -826,6 +990,21 @@ function renderAdaptivePanel(){
   }else{
     rows.push(`<div class="disclaimer">صفقاتك المعاكسة للفريم الأكبر: تحتاج ${MIN_SAMPLE} صفقات مقيَّمة على الأقل من هذا النوع لتفعيل التعلّم.</div>`);
   }
+
+  const SESSION_LABELS = {opening:'أول 15 دقيقة', morning:'الصباح (9:45-11:30)', midday:'الظهر (11:30-2:00)', close:'آخر ساعتين'};
+  const WEEKDAY_LABELS_AR = {Sun:'الأحد', Mon:'الإثنين', Tue:'الثلاثاء', Wed:'الأربعاء', Thu:'الخميس', Fri:'الجمعة', Sat:'السبت'};
+
+  Object.keys(adj).forEach(key=>{
+    if(!key.startsWith('session_') && !key.startsWith('weekday_')) return;
+    const info = adj[key];
+    const isSession = key.startsWith('session_');
+    const rawLabel = key.replace('session_','').replace('weekday_','');
+    const label = isSession ? (SESSION_LABELS[rawLabel]||rawLabel) : (WEEKDAY_LABELS_AR[rawLabel]||rawLabel);
+    const pct = Math.round(info.winRate*100);
+    rows.push(`<div class="disclaimer" style="margin-bottom:6px; ${info.penalized?'color:var(--gold);':''}">
+      ${info.penalized?'⚠️':'ℹ️'} ${isSession?'فترة':'يوم'} "${label}": ${pct}% نجاح من أصل ${info.sample} صفقة${info.penalized?' — أداؤك ضعيف بهذي الفترة تاريخيًا.':''}
+    </div>`);
+  });
 
   card.innerHTML = html + rows.join('');
 }

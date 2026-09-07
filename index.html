@@ -80,7 +80,14 @@
       <input id="riskPctInput" type="number" step="0.1" min="0.3" max="10" style="direction:ltr;">
       <button class="btn btn-green" style="width:80px;" onclick="saveRiskPct()">حفظ</button>
     </div>
-    <div class="disclaimer">في الوضع التلقائي: تُستخدم هذي النسبة فقط لو ما توفر دعم/مقاومة كافٍ للسهم. في الوضع اليدوي: هذي هي النسبة الثابتة المستخدمة دائمًا. الافتراضي 2%.</div>
+    <div class="disclaimer" style="margin-bottom:16px;">في الوضع التلقائي: تُستخدم هذي النسبة فقط لو ما توفر دعم/مقاومة كافٍ للسهم. في الوضع اليدوي: هذي هي النسبة الثابتة المستخدمة دائمًا. الافتراضي 2%.</div>
+
+    <div class="val" style="margin-bottom:8px;">المبلغ المخاطر به لكل صفقة ($)</div>
+    <div class="flexgap" style="margin-bottom:4px;">
+      <input id="riskAmountInput" type="number" step="5" min="5" style="direction:ltr;">
+      <button class="btn btn-green" style="width:80px;" onclick="saveRiskAmount()">حفظ</button>
+    </div>
+    <div class="disclaimer">يُستخدم لحساب عدد الأسهم المقترح لكل توصية بحيث لا تخسر أكثر من هذا المبلغ لو ضرب الوقف. الافتراضي $100.</div>
   </div>
 
   <nav class="tabs">
